@@ -296,6 +296,34 @@ a { color: inherit; text-decoration: none; }
   border-radius: 10px; font-size: 14px; font-weight: 700; text-align: center;
 }
 
+/* ── FIREBASE SYNC UI ────────────────────────────────────── */
+.fb-dot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  background: #aaa; flex-shrink: 0;
+}
+.fb-dot.on { background: #16A34A; box-shadow: 0 0 6px rgba(22,163,74,.5); }
+.fb-dot.off { background: #aaa; }
+.sync-grid { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.sync-card {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px; border-radius: 10px;
+  background: var(--bg); border: 1px solid var(--border);
+}
+.sync-me { border-color: var(--orange); background: var(--orange-glow); }
+.sync-avatar {
+  width: 36px; height: 36px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-weight: 700; font-size: 15px; flex-shrink: 0;
+}
+.sync-info { flex: 1; min-width: 0; }
+.sync-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.sync-bar-wrap {
+  height: 6px; border-radius: 3px; background: var(--border);
+  overflow: hidden; margin-bottom: 3px;
+}
+.sync-bar-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+.sync-count { font-size: 12px; color: var(--muted); }
+
 /* ── TOAST ───────────────────────────────────────────────── */
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -309,6 +337,8 @@ a { color: inherit; text-decoration: none; }
 }
 .toast.on { opacity: 1; }
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 </head>
 <body>
 
@@ -572,12 +602,27 @@ var CLUSTERS = {
 var PRIZES = {1:'🏍️ Moto',2:'📱 Celular',3:'📱 Celular'};
 
 /* ═══════════════════════════════════════════════════════════
+   FIREBASE
+   ═══════════════════════════════════════════════════════════ */
+firebase.initializeApp({
+  apiKey: "AIzaSyC8yWTdTwpuCWQQhaOxD3dBf1BoxGIRJdY",
+  authDomain: "jurado-didi.firebaseapp.com",
+  databaseURL: "https://jurado-didi-default-rtdb.firebaseio.com",
+  projectId: "jurado-didi",
+  storageBucket: "jurado-didi.firebasestorage.app",
+  messagingSenderId: "858278080004",
+  appId: "1:858278080004:web:40b3ea8d93dbf311d0cf51"
+});
+var db = firebase.database();
+var fbConnected = false;
+
+/* ═══════════════════════════════════════════════════════════
    STATE
    ═══════════════════════════════════════════════════════════ */
 var me       = null;   // current juror name
 var tab      = 'guia'; // active tab
 var votes    = {};     // { videoId: {originalidad:N, mensajePositivo:N, calidadVisual:N} }
-var imported = {};     // { jurorName: { videoId: {...}, ... }, ... }  — imported from other jurors
+var imported = {};     // { jurorName: { videoId: {...}, ... }, ... }  — from Firebase (all jurors)
 
 var root   = document.getElementById('root');
 var $toast = document.getElementById('toast');
@@ -596,6 +641,8 @@ function score(v){
 function allVideos(){ return CLUSTERS.cluster1.videos.concat(CLUSTERS.cluster2.videos); }
 function save(){
   try{ localStorage.setItem(lsKey(me), JSON.stringify(votes)); }catch(e){}
+  // Sync to Firebase
+  try{ db.ref('c3_votes/'+me).set(votes); }catch(e){ console.warn('Firebase save error',e); }
 }
 function load(){
   votes={};
@@ -604,6 +651,41 @@ function load(){
 function loadImported(){
   imported={};
   try{var s=localStorage.getItem('didi_c3_imported'); if(s) imported=JSON.parse(s);}catch(e){}
+}
+function startFirebaseSync(){
+  // Monitor connection state
+  db.ref('.info/connected').on('value', function(snap){
+    fbConnected = !!snap.val();
+    var dot = document.getElementById('fb-status');
+    if(dot) dot.className = 'fb-dot '+(fbConnected?'on':'off');
+  });
+  // Listen for all jurors' votes in real-time
+  db.ref('c3_votes').on('value', function(snap){
+    var data = snap.val() || {};
+    imported = {};
+    Object.keys(data).forEach(function(jurorName){
+      imported[jurorName] = data[jurorName];
+    });
+    // Cache imported in localStorage as fallback
+    try{ localStorage.setItem('didi_c3_imported', JSON.stringify(imported)); }catch(e){}
+    // Auto-refresh rankings if on that tab
+    if(tab === 'rankings') showRankings();
+    // Update progress bar
+    updateProgress();
+  });
+  // Push current votes to Firebase (in case localStorage has votes not yet synced)
+  if(me && Object.keys(votes).length){
+    try{ db.ref('c3_votes/'+me).set(votes); }catch(e){}
+  }
+}
+function updateProgress(){
+  var vids = allVideos();
+  var done = vids.filter(function(v){return votes[v.id]&&score(votes[v.id])!==null;}).length;
+  var pct = Math.round(done/vids.length*100);
+  var label = document.querySelector('.progress-label');
+  var fill = document.querySelector('.progress-fill');
+  if(label) label.textContent = done+' de '+vids.length+' evaluados ('+pct+'%)';
+  if(fill) fill.style.width = pct+'%';
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -629,6 +711,7 @@ function pickJuror(name){
   me=name;
   try{localStorage.setItem('didi_c3_juror',name);}catch(e){}
   load(); loadImported();
+  startFirebaseSync();
   tab='guia';
   render();
   toast(name.split(' ')[0]+' — listo para votar');
@@ -661,7 +744,7 @@ function render(){
       tabBtn('cluster1','Cluster 1')+
       tabBtn('cluster2','Cluster 2')+
       tabBtn('rankings','Rankings')+
-      tabBtn('sync','Compartir')+
+      tabBtn('sync','En Vivo')+
     '</div>'+
     '<div class="content" id="pane"></div>';
 
@@ -806,8 +889,8 @@ function showGuide(){
     '<div class="g-step"><span class="g-step-icon">👤</span><div><strong>Identifícate</strong><div class="g-step-desc">Selecciona tu nombre del jurado.</div></div></div>'+
     '<div class="g-step"><span class="g-step-icon">🎬</span><div><strong>Abre el video</strong><div class="g-step-desc">Cada creador tiene un botón para ver su video. Los <strong>botones negros</strong> abren TikTok y los <strong>botones degradados</strong> abren Instagram. Algunos tienen variantes (Var 2, Var 3) del mismo creador.</div></div></div>'+
     '<div class="g-step"><span class="g-step-icon">⭐</span><div><strong>Califica del 1 al 10</strong><div class="g-step-desc">Haz clic en un número para cada criterio. Para cambiar, clic en otro. Para <strong>quitar tu voto</strong>, clic en el mismo número.</div></div></div>'+
-    '<div class="g-step"><span class="g-step-icon">💾</span><div><strong>Se guarda automático</strong><div class="g-step-desc">No hay botón de enviar. Cada voto se guarda al instante en tu dispositivo.</div></div></div>'+
-    '<div class="g-step"><span class="g-step-icon">📤</span><div><strong>Comparte tu código</strong><div class="g-step-desc">Al terminar, ve a la pestaña <strong>"Compartir"</strong> y copia tu código de votos. Envíalo al grupo para consolidar el ranking.</div></div></div>'+
+    '<div class="g-step"><span class="g-step-icon">💾</span><div><strong>Se guarda automático</strong><div class="g-step-desc">No hay botón de enviar. Cada voto se guarda al instante y se sincroniza con todo el jurado en tiempo real.</div></div></div>'+
+    '<div class="g-step"><span class="g-step-icon">🔴</span><div><strong>Sincronización en vivo</strong><div class="g-step-desc">Tus votos se sincronizan automáticamente con todo el jurado. Ve a la pestaña <strong>"En Vivo"</strong> para ver el progreso de todos.</div></div></div>'+
   '</div></div>'+
 
   '<div class="g-block"><div class="g-num">5</div>'+
@@ -846,63 +929,43 @@ function showGuide(){
    ═══════════════════════════════════════════════════════════ */
 function showSync(){
   var pane = document.getElementById('pane');
-  var hasVotes = Object.keys(votes).length > 0;
-  var code = hasVotes ? 'DIDI3|'+me+'|'+btoa(unescape(encodeURIComponent(JSON.stringify(votes)))) : '';
+  var totalVids = allVideos().length;
+
+  // Build juror status cards
+  var jurorCards = JURORS.map(function(j, idx){
+    var jVotes = imported[j] || (j===me ? votes : {});
+    var vCount = 0;
+    Object.keys(jVotes).forEach(function(vid){
+      if(score(jVotes[vid])!==null) vCount++;
+    });
+    var pct = Math.round(vCount/totalVids*100);
+    var isMe = j===me;
+    return '<div class="sync-card'+(isMe?' sync-me':'')+'">'+
+      '<div class="sync-avatar" style="background:'+COLORS[idx]+'">'+j.charAt(0)+'</div>'+
+      '<div class="sync-info">'+
+        '<div class="sync-name">'+j+(isMe?' (tú)':'')+'</div>'+
+        '<div class="sync-bar-wrap">'+
+          '<div class="sync-bar-fill" style="width:'+pct+'%;background:'+COLORS[idx]+'"></div>'+
+        '</div>'+
+        '<div class="sync-count">'+vCount+'/'+totalVids+' videos</div>'+
+      '</div>'+
+    '</div>';
+  }).join('');
 
   pane.innerHTML =
   '<div class="export-section" style="border:none;padding-top:0">'+
-    '<div class="export-title">📤 Exportar mis votos</div>'+
-    '<div class="export-desc">Copia este código y envíalo al grupo (WhatsApp, Slack, etc.). El administrador lo pega en la sección de abajo para consolidar el ranking.</div>'+
-    (hasVotes
-      ? '<textarea class="import-area" id="export-code" readonly style="font-size:11px;word-break:break-all">'+code+'</textarea>'+
-        '<button class="export-btn" id="btn-copy">Copiar código al portapapeles</button>'
-      : '<div class="rank-empty">Aún no has votado ningún video.</div>')+
+    '<div class="export-title">🔴 Sincronización en Vivo</div>'+
+    '<div class="export-desc" style="display:flex;align-items:center;gap:8px">'+
+      '<span id="fb-status" class="fb-dot '+(fbConnected?'on':'off')+'"></span>'+
+      '<span>'+(fbConnected?'Conectado — los votos se sincronizan automáticamente':'Conectando...')+'</span>'+
+    '</div>'+
   '</div>'+
 
   '<div class="export-section">'+
-    '<div class="export-title">📥 Importar votos del equipo</div>'+
-    '<div class="export-desc">Pega aquí los códigos de los demás jurados, uno por línea. Después ve a Rankings para ver el resultado consolidado.</div>'+
-    '<textarea class="import-area" id="import-box" placeholder="Pega los códigos aquí, uno por línea..."></textarea>'+
-    '<button class="btn-orange" id="btn-import">Importar y actualizar rankings</button>'+
+    '<div class="export-title">👥 Progreso del Jurado</div>'+
+    '<div class="export-desc">Los votos de todos los jurados se actualizan en tiempo real. No necesitas exportar ni importar códigos.</div>'+
+    '<div class="sync-grid">'+jurorCards+'</div>'+
   '</div>';
-
-  if(document.getElementById('btn-copy')){
-    document.getElementById('btn-copy').onclick = function(){
-      var el=document.getElementById('export-code');
-      el.select(); el.setSelectionRange(0,99999);
-      try{ navigator.clipboard.writeText(el.value); toast('✓ Código copiado'); }
-      catch(e){ document.execCommand('copy'); toast('✓ Copiado'); }
-    };
-  }
-
-  document.getElementById('btn-import').onclick = function(){
-    var raw = document.getElementById('import-box').value.trim();
-    if(!raw){ toast('Pega al menos un código'); return; }
-    var lines = raw.split('\n');
-    var count = 0;
-    lines.forEach(function(line){
-      line = line.trim();
-      if(!line) return;
-      // Accept DIDI3| prefix for Ciclo 3
-      var prefix = '';
-      if(line.indexOf('DIDI3|')===0) prefix='DIDI3|';
-      else return;
-      var rest = line.substring(prefix.length);
-      var pipeIdx = rest.indexOf('|');
-      if(pipeIdx===-1) return;
-      var name = rest.substring(0, pipeIdx);
-      var b64  = rest.substring(pipeIdx+1);
-      try{
-        var data = JSON.parse(decodeURIComponent(escape(atob(b64))));
-        imported[name] = data;
-        count++;
-      }catch(e){}
-    });
-    // Also include current user
-    if(Object.keys(votes).length) imported[me] = votes;
-    try{ localStorage.setItem('didi_c3_imported', JSON.stringify(imported)); }catch(e){}
-    toast('✓ '+count+' jurado'+(count!==1?'s':'')+' importado'+(count!==1?'s':''));
-  };
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -943,7 +1006,7 @@ function showRankings(){
       '<div class="rank-sub">'+cl.subtitle+' · '+cl.videos.length+' creadores</div>';
 
     if(rows.every(function(r){return r.n===0;})){
-      html += '<div class="rank-empty">Aún no hay votos. Importa los códigos del equipo en la pestaña "Compartir".</div>';
+      html += '<div class="rank-empty">Aún no hay votos para este cluster. Los votos aparecerán aquí en tiempo real.</div>';
     } else {
       rows.forEach(function(r,i){
         var pos=i+1, top=pos<=3, cls=top?'rank-row top p'+pos:'rank-row';
@@ -986,6 +1049,7 @@ function showRankings(){
       load();
       // Add own votes to imported for rankings
       if(Object.keys(votes).length) imported[me]=votes;
+      startFirebaseSync();
       render();
       return;
     }
